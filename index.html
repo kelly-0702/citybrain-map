@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html class="dark" lang="zh-TW">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>CITYBRAIN - 智慧導航系統</title>
+    
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+
+    <style>
+        .glass-card { background: rgba(16, 19, 26, 0.95); backdrop-filter: blur(32px); border: 1px solid rgba(255, 255, 255, 0.08); }
+        #map { height: 400px; width: 100%; border-radius: 32px; z-index: 1; background: #0b0e14; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .leaflet-tile-pane { filter: brightness(0.6) invert(0.9) contrast(1.2) hue-rotate(180deg) saturate(0.4); opacity: 0.9; }
+        .leaflet-container { background: #0b0e14 !important; }
+        .leaflet-routing-container { display: none !important; }
+        .route-glow { filter: drop-shadow(0 0 10px #01f5a0); stroke-dasharray: 10, 15; animation: dash 15s linear infinite; }
+        @keyframes dash { to { stroke-dashoffset: -500; } }
+        
+        /* 徹底解決手機端佈局切掉與捲動問題 */
+        html, body { 
+            height: 100dvh; 
+            overflow: hidden; 
+            background: #0b0e14; 
+            margin: 0;
+            padding: 0;
+        }
+        main { 
+            height: calc(100dvh - 170px); /* 扣除 Header 與 Footer 的高度 */
+            overflow-y: auto; 
+            -webkit-overflow-scrolling: touch; 
+        }
+        nav {
+            padding-bottom: calc(1.5rem + env(safe-area-inset-bottom)); /* 支援 iPhone 底部安全區域 */
+        }
+    </style>
+</head>
+<body class="text-[#e1e2eb] font-sans">
+
+    <div class="mx-auto w-full max-w-md h-full flex flex-col relative bg-[#0b0e14]">
+        
+        <!-- Top App Bar -->
+        <header class="flex-none glass-card px-5 py-4 flex justify-between items-center z-[2000] border-b border-white/5">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-[#5d5fef] flex items-center justify-center text-white shadow-lg">
+                    <span class="material-symbols-outlined">bolt</span>
+                </div>
+                <h1 class="text-xl font-bold tracking-tighter text-[#c1c1ff]">CITYBRAIN</h1>
+            </div>
+            <div class="flex items-center gap-2">
+                <div id="gps-dot" class="w-2 h-2 rounded-full bg-[#01f5a0] animate-pulse"></div>
+                <span id="header-user" class="text-[10px] text-[#01f5a0] font-black uppercase tracking-widest">載入中</span>
+            </div>
+        </header>
+
+        <!-- 主內容捲動區 -->
+        <main class="flex-grow px-5 pt-4">
+            
+            <!-- 1. 首頁 (Home) -->
+            <section id="home" class="tab-content active space-y-6">
+                <div class="py-4">
+                    <h2 class="text-3xl font-bold" id="welcome-name">早安</h2>
+                    <p class="text-[#c1c1ff] font-medium">智慧綠波路網已就緒</p>
+                </div>
+                <div class="glass-card rounded-2xl p-4 flex items-center gap-3 ring-1 ring-white/10">
+                    <span class="material-symbols-outlined text-[#908fa0]">search</span>
+                    <input id="dest-input" type="text" placeholder="目的地搜尋" class="bg-transparent border-none focus:ring-0 text-white w-full p-0">
+                    <button onclick="startSearch()" class="bg-[#5d5fef] p-2 rounded-lg text-white"><span class="material-symbols-outlined">arrow_forward</span></button>
+                </div>
+                <!-- 快捷地點：僅在登入時顯示 -->
+                <div id="home-fav-grid" class="grid grid-cols-2 gap-4 pb-10"></div>
+                <div id="guest-home-msg" class="text-center py-10 opacity-40 text-sm">
+                    登入以顯示常用地點快捷鍵
+                </div>
+            </section>
+
+            <!-- 2. 導航 (Nav) -->
+            <section id="nav" class="tab-content space-y-4">
+                <div class="relative">
+                    <div id="map" class="glass-card overflow-hidden shadow-2xl"></div>
+                    <div class="absolute top-4 inset-x-4 z-[1000]">
+                        <div class="glass-card bg-[#1d2026]/95 border-l-4 border-[#01f5a0] p-4 rounded-2xl flex items-center gap-4">
+                            <span class="material-symbols-outlined text-3xl text-[#01f5a0]">navigation</span>
+                            <div class="flex-1 overflow-hidden">
+                                <p id="next-step-dist" class="text-[11px] text-[#01f5a0] font-black uppercase">路徑規劃</p>
+                                <p id="next-step-road" class="font-bold truncate text-white text-lg">即將開始</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="glass-card rounded-[36px] p-6 border-l-4 border-[#5d5fef]">
+                    <div class="flex justify-between items-center mb-6">
+                        <div class="flex flex-col">
+                            <span class="text-[10px] text-[#908fa0] font-black uppercase">預計抵達</span>
+                            <span id="eta-time" class="text-xl font-bold text-white tracking-wide">--:--</span>
+                        </div>
+                        <span id="timer" class="text-2xl font-bold text-[#01f5a0]">12s</span>
+                    </div>
+                    <div class="flex justify-between items-end">
+                        <div class="space-y-1">
+                            <div class="flex items-baseline gap-2">
+                                <p class="text-5xl font-black text-white" id="time-display">--</p>
+                                <span class="text-sm font-bold text-[#908fa0]">MIN</span>
+                            </div>
+                            <p id="dist-display" class="text-xs font-bold text-[#01f5a0]">-- km • 綠波同步中</p>
+                        </div>
+                        <button onclick="saveCurrentDest()" id="save-dest-btn" class="hidden p-4 bg-white/5 rounded-2xl text-[10px] font-black border border-white/5 uppercase">儲存地點</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 3. 洞察 (Insights) -->
+            <section id="insights" class="tab-content space-y-6">
+                <div class="py-4"><h2 class="text-3xl font-bold">智慧洞察</h2></div>
+                <div class="glass-card p-10 rounded-[40px] flex flex-col items-center text-center space-y-2 border-b-4 border-[#01f5a0]">
+                    <p class="text-[#908fa0] text-sm font-black uppercase tracking-widest">累計為您省下</p>
+                    <div class="flex items-baseline gap-2">
+                        <span id="total-saved-min" class="text-5xl font-black text-[#01f5a0]">無資料</span>
+                        <span id="total-saved-unit" class="text-xl font-bold text-white uppercase tracking-tighter"></span>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="glass-card p-6 rounded-3xl"><p class="text-xs text-[#908fa0] mb-1">累計減碳</p><p id="total-co2" class="text-xl font-bold">無資料</p></div>
+                    <div class="glass-card p-6 rounded-3xl"><p class="text-xs text-[#908fa0] mb-1">平均速限</p><p class="text-xl font-bold">45 <span class="text-xs">km/h</span></p></div>
+                </div>
+            </section>
+
+            <!-- 4. 個人 (Profile) -->
+            <section id="profile" class="tab-content space-y-6 pt-4 pb-20">
+                <div class="flex items-center gap-5 p-6 glass-card rounded-[32px]">
+                    <div id="user-avatar" class="w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold text-white">?</div>
+                    <div class="text-left">
+                        <h3 id="user-name-display" class="text-xl font-bold">訪客</h3>
+                        <p id="user-status-text" class="text-xs text-[#908fa0]">登入以開啟完整功能</p>
+                    </div>
+                </div>
+
+                <div id="fav-manager" class="hidden glass-card p-6 rounded-[32px] space-y-4">
+                    <h4 class="font-bold text-[#c1c1ff] flex items-center gap-2"><span class="material-symbols-outlined">add_location_alt</span> 管理常用地點</h4>
+                    <div class="flex gap-2">
+                        <input id="manual-place" type="text" placeholder="輸入名稱 (如: 家)" class="bg-white/5 border-none focus:ring-1 ring-[#c1c1ff] rounded-xl text-white w-full">
+                        <button onclick="addManualPlace()" class="px-5 py-2 bg-[#01f5a0] text-black rounded-xl font-bold text-sm shrink-0">儲存</button>
+                    </div>
+                    <div id="fav-list" class="space-y-2 pt-2"></div>
+                </div>
+
+                <div class="pt-4">
+                    <button onclick="toggleLoginState()" id="login-btn" class="w-full p-5 glass-card rounded-2xl flex items-center justify-center font-bold text-[#01f5a0]">
+                        登入系統
+                    </button>
+                </div>
+            </section>
+        </main>
+
+        <!-- Bottom Navigation Bar (修正遮擋) -->
+        <nav class="flex-none glass-card px-4 pt-4 flex justify-around border-t border-white/10 z-[3000]">
+            <button onclick="switchTab('home')" class="nav-item flex flex-col items-center gap-1 text-[#c1c1ff]" data-target="home">
+                <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">home</span>
+                <span class="text-[10px] font-bold">首頁</span>
+            </button>
+            <button onclick="switchTab('nav')" class="nav-item flex flex-col items-center gap-1 text-[#908fa0]" data-target="nav">
+                <span class="material-symbols-outlined">assistant_navigation</span>
+                <span class="text-[10px] font-bold">導航</span>
+            </button>
+            <button onclick="switchTab('insights')" class="nav-item flex flex-col items-center gap-1 text-[#908fa0]" data-target="insights">
+                <span class="material-symbols-outlined">monitoring</span>
+                <span class="text-[10px] font-bold">洞察</span>
+            </button>
+            <button onclick="switchTab('profile')" class="nav-item flex flex-col items-center gap-1 text-[#908fa0]" data-target="profile">
+                <span class="material-symbols-outlined">person</span>
+                <span class="text-[10px] font-bold">個人</span>
+            </button>
+        </nav>
+    </div>
+
+    <script>
+        let map, routingControl, userLat, userLon, destMarker;
+        
+        let savedPlaces = JSON.parse(localStorage.getItem('cb_places')) || ["台北101"];
+        let totalSavedMin = parseInt(localStorage.getItem('cb_saved_time')) || 0;
+        let isLoggedIn = localStorage.getItem('is_logged_in') === 'true';
+
+        function aiSpeak(text) {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const u = new SpeechSynthesisUtterance(text);
+                u.lang = 'zh-TW'; u.rate = 1.0;
+                window.speechSynthesis.speak(u);
+            }
+        }
+
+        function init() {
+            updateUserUI();
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(p => {
+                    userLat = p.coords.latitude; userLon = p.coords.longitude;
+                    if (!map) {
+                        map = L.map('map', { zoomControl: false }).setView([userLat, userLon], 16);
+                        map.createPane('routePane').style.zIndex = 650;
+                        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                        L.circleMarker([userLat, userLon], { radius: 10, color: '#fff', fillColor: '#5d5fef', fillOpacity: 1, weight: 4 }).addTo(map);
+                    }
+                });
+            }
+        }
+
+        function updateUserUI() {
+            const h = document.getElementById('header-user');
+            const w = document.getElementById('welcome-name');
+            const l = document.getElementById('login-btn');
+            const a = document.getElementById('user-avatar');
+            const n = document.getElementById('user-name-display');
+            const s = document.getElementById('user-status-text');
+            const fm = document.getElementById('fav-manager');
+            const sd = document.getElementById('save-dest-btn');
+
+            if (isLoggedIn) {
+                h.innerText = "宇翔"; w.innerText = "早安，宇翔";
+                n.innerText = "宇翔 (Sean)";
+                s.innerText = "系統連線良好"; s.className = "text-xs text-[#01f5a0]";
+                l.innerText = "登出系統"; l.className = "w-full p-5 glass-card rounded-2xl text-red-400 font-bold";
+                a.innerText = "宇"; a.className = "w-16 h-16 rounded-full bg-[#5d5fef] flex items-center justify-center text-white text-2xl font-bold";
+                fm.classList.remove('hidden'); sd.classList.remove('hidden');
+                document.getElementById('guest-home-msg').classList.add('hidden');
+                renderFavorites();
+                renderInsights();
+            } else {
+                h.innerText = "訪客模式"; w.innerText = "早安，訪客";
+                n.innerText = "尚未登入";
+                s.innerText = "登入以開啟完整功能"; s.className = "text-xs text-[#908fa0]";
+                l.innerText = "立即登入"; l.className = "w-full p-5 glass-card rounded-2xl text-[#01f5a0] font-bold";
+                a.innerText = "?"; a.className = "w-16 h-16 rounded-full bg-white/5 flex items-center justify-center text-[#908fa0] text-2xl font-bold";
+                fm.classList.add('hidden'); sd.classList.add('hidden');
+                document.getElementById('guest-home-msg').classList.remove('hidden');
+                document.getElementById('home-fav-grid').innerHTML = "";
+                renderInsights();
+            }
+        }
+
+        function toggleLoginState() {
+            isLoggedIn = !isLoggedIn;
+            localStorage.setItem('is_logged_in', isLoggedIn);
+            updateUserUI();
+        }
+
+        function renderInsights() {
+            const display = document.getElementById('total-saved-min');
+            const co2Display = document.getElementById('total-co2');
+            const unit = document.getElementById('total-saved-unit');
+            if (isLoggedIn) {
+                display.innerText = totalSavedMin;
+                display.className = "text-7xl font-black text-[#01f5a0]";
+                unit.innerText = "MIN";
+                co2Display.innerText = (totalSavedMin * 0.05).toFixed(1) + " kg";
+                co2Display.className = "text-xl font-bold text-[#01f5a0]";
+            } else {
+                display.innerText = "無資料";
+                display.className = "text-5xl font-black text-[#908fa0]";
+                unit.innerText = "";
+                co2Display.innerText = "無資料";
+                co2Display.className = "text-xl font-bold text-[#908fa0]";
+            }
+        }
+
+        function renderFavorites() {
+            if (!isLoggedIn) return;
+            const list = document.getElementById('fav-list');
+            const grid = document.getElementById('home-fav-grid');
+            list.innerHTML = ""; grid.innerHTML = "";
+            savedPlaces.forEach(p => {
+                list.innerHTML += `<div class="glass-card p-4 rounded-xl flex justify-between items-center text-sm">
+                    <span class="font-bold">${p}</span>
+                    <div class="flex gap-2"><button onclick="quickSearch('${p}')" class="bg-[#01f5a0] text-black text-[10px] px-3 py-1 rounded-lg font-bold">導航</button>
+                    <button onclick="removePlace('${p}')" class="text-red-400 text-xs px-2">刪除</button></div>
+                </div>`;
+                grid.innerHTML += `<button onclick="quickSearch('${p}')" class="glass-card p-5 rounded-[32px] text-left aspect-square flex flex-col justify-between active:scale-95 transition-all">
+                    <span class="material-symbols-outlined text-[#01f5a0] text-4xl">push_pin</span>
+                    <h3 class="font-bold text-lg">${p}</h3>
+                </button>`;
+            });
+        }
+
+        function addManualPlace() {
+            const name = document.getElementById('manual-place').value;
+            if (name && !savedPlaces.includes(name)) {
+                savedPlaces.push(name);
+                localStorage.setItem('cb_places', JSON.stringify(savedPlaces));
+                renderFavorites();
+                document.getElementById('manual-place').value = "";
+                aiSpeak("已儲存" + name);
+            }
+        }
+
+        function removePlace(name) {
+            savedPlaces = savedPlaces.filter(p => p !== name);
+            localStorage.setItem('cb_places', JSON.stringify(savedPlaces));
+            renderFavorites();
+        }
+
+        function saveCurrentDest() {
+            const current = document.getElementById('dest-input').value;
+            if (current && !savedPlaces.includes(current)) {
+                savedPlaces.push(current);
+                localStorage.setItem('cb_places', JSON.stringify(savedPlaces));
+                renderFavorites();
+                aiSpeak("地點已加入收藏");
+            }
+        }
+
+        function startSearch() {
+            const d = document.getElementById('dest-input').value;
+            if (!d) return;
+            aiSpeak("正在搜尋" + d);
+            performSearch(d);
+        }
+
+        async function performSearch(dest) {
+            switchTab('nav');
+            try {
+                const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(dest + " 台灣")}&limit=1`);
+                const d = await r.json();
+                if (d && d.length > 0) planRoute(d[0].lat, d[0].lon, dest);
+            } catch (e) { alert("連線失敗"); }
+        }
+
+        function planRoute(dLat, dLon, name) {
+            if (routingControl) map.removeControl(routingControl);
+            if (destMarker) map.removeLayer(destMarker);
+            destMarker = L.marker([dLat, dLon]).addTo(map);
+
+            routingControl = L.Routing.control({
+                waypoints: [L.latLng(userLat, userLon), L.latLng(dLat, dLon)],
+                lineOptions: { styles: [{ color: '#01f5a0', weight: 8, opacity: 0.9, className: 'route-glow' }], pane: 'routePane' },
+                addWaypoints: false, draggableWaypoints: false, createMarker: () => null
+            }).addTo(map);
+
+            routingControl.on('routesfound', (e) => {
+                const r = e.routes[0];
+                const mins = Math.round((r.summary.totalTime / 60) * 1.7);
+                
+                if (isLoggedIn) {
+                    totalSavedMin += Math.round(mins * 0.15);
+                    localStorage.setItem('cb_saved_time', totalSavedMin);
+                    renderInsights();
+                }
+
+                document.getElementById('dist-display').innerText = `${(r.summary.totalDistance / 1000).toFixed(1)} km • 綠波中`;
+                document.getElementById('time-display').innerText = mins;
+                const now = new Date(); now.setMinutes(now.getMinutes() + mins);
+                document.getElementById('eta-time').innerText = now.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+
+                if (r.instructions && r.instructions.length > 1) {
+                    const s = r.instructions[1];
+                    const distT = s.distance >= 1000 ? (s.distance/1000).toFixed(1) + '公里' : Math.round(s.distance) + '公尺';
+                    const act = s.text.replace(/Turn left/gi, "左轉").replace(/Turn right/gi, "右轉").replace(/Head/gi, "出發").replace(/onto/gi, "進入").replace(/Go straight/gi, "直行").replace(/to stay on/gi, "持續行駛");
+                    document.getElementById('next-step-dist').innerText = distT + ' 後';
+                    document.getElementById('next-step-road').innerText = act;
+                    aiSpeak(`${distT} 後 ${act}。`);
+                }
+                map.fitBounds(r.bounds, { padding: [80, 120] });
+            });
+        }
+
+        function quickSearch(n) { document.getElementById('dest-input').value = n; aiSpeak("前往" + n); performSearch(n); }
+        
+        function switchTab(t) {
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            document.getElementById(t).classList.add('active');
+            if (t === 'nav' && map) setTimeout(() => map.invalidateSize(), 300);
+            document.querySelectorAll('.nav-item').forEach(i => {
+                const act = i.dataset.target === t;
+                i.classList.toggle('text-[#c1c1ff]', act); i.classList.toggle('text-[#908fa0]', !act);
+                i.querySelector('.material-symbols-outlined').style.fontVariationSettings = act ? "'FILL' 1" : "'FILL' 0";
+            });
+        }
+
+        function openGoogleMaps() {
+            const d = document.getElementById('dest-input').value || "目的地";
+            window.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(d)}&travelmode=driving`, '_blank');
+        }
+
+        let sec = 12; setInterval(() => { sec = sec <= 0 ? 15 : sec - 1; document.getElementById('timer').innerText = sec + 's'; }, 1000);
+        window.onload = init;
+        document.getElementById('dest-input').addEventListener('keypress', e => e.key === 'Enter' && startSearch());
+    </script>
+</body>
+</html>
